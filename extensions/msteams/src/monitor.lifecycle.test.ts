@@ -319,7 +319,9 @@ describe("monitorMSTeamsProvider lifecycle", () => {
       pollStore: createStores().pollStore,
     });
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      expect(expressControl.apps.length).toBeGreaterThan(0);
+    });
 
     const app = expressControl.apps.at(-1);
     expect(app).toBeDefined();

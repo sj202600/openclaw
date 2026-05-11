@@ -579,8 +579,12 @@ describe("chat voice controls", () => {
     await i18n.setLocale("zh-CN");
     const container = renderChatView();
 
-    expect(container.querySelector(`[aria-label="${t("chat.composer.startTalk")}"]`)).toBeTruthy();
-    expect(container.querySelector(`[aria-label="${t("chat.composer.attachFile")}"]`)).toBeTruthy();
+    expect(
+      container.querySelector(`[aria-label="${t("chat.composer.startTalk")}"]`),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(`[aria-label="${t("chat.composer.attachFile")}"]`),
+    ).not.toBeNull();
     expect(container.querySelector("textarea")?.getAttribute("placeholder")).toBe(
       t("chat.composer.placeholder", { name: "Val" }),
     );
@@ -957,11 +961,11 @@ describe("chat session controls", () => {
     const container = document.createElement("div");
     render(renderChatSessionSelect(state), container);
 
-    expect(container.querySelector(`[aria-label="${t("chat.selectors.session")}"]`)).toBeTruthy();
-    expect(container.querySelector(`[aria-label="${t("chat.selectors.model")}"]`)).toBeTruthy();
+    expect(container.querySelector(`[aria-label="${t("chat.selectors.session")}"]`)).not.toBeNull();
+    expect(container.querySelector(`[aria-label="${t("chat.selectors.model")}"]`)).not.toBeNull();
     expect(
       container.querySelector(`[aria-label="${t("chat.selectors.thinkingLevel")}"]`),
-    ).toBeTruthy();
+    ).not.toBeNull();
     expect(container.innerHTML).not.toContain("Chat session");
   });
 
@@ -1067,7 +1071,7 @@ describe("chat session controls", () => {
       key: "main",
       model: "openai/gpt-5-mini",
     });
-    expect(request).not.toHaveBeenCalledWith("chat.history", expect.anything());
+    expect(request.mock.calls.some(([method]) => method === "chat.history")).toBe(false);
     await flushTasks();
     expect(loadSessionsMock).toHaveBeenCalledTimes(1);
     expect(state.sessionsResult?.sessions[0]?.model).toBe("gpt-5-mini");

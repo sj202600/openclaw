@@ -1,4 +1,8 @@
-import { escapeRegExp, formatEnvelopeTimestamp } from "openclaw/plugin-sdk/channel-test-helpers";
+import {
+  escapeRegExp,
+  formatEnvelopeTimestamp,
+  stripAnsi,
+} from "openclaw/plugin-sdk/channel-test-helpers";
 import type { GetReplyOptions, MsgContext } from "openclaw/plugin-sdk/reply-runtime";
 import { sanitizeTerminalText } from "openclaw/plugin-sdk/test-fixtures";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -441,9 +445,8 @@ describe("createTelegramBot", () => {
     const sequentializer = sequentializeSpy.mock.results[0]?.value as
       | TelegramMiddleware
       | undefined;
-    expect(sequentializer).toBeDefined();
     if (!sequentializer) {
-      return;
+      throw new Error("Expected sequentialize middleware");
     }
 
     const topicCtx = (threadId: number, updateId: number) => {
