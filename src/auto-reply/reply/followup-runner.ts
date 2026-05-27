@@ -45,11 +45,13 @@ import { resolveFollowupDeliveryPayloads } from "./followup-delivery.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
 import {
   completeFollowupRunLifecycle,
+  FollowupRunDeferredError,
   isFollowupRunAborted,
   refreshQueuedFollowupSession,
   type FollowupRun,
 } from "./queue.js";
-import { createReplyOperation } from "./reply-run-registry.js";
+import type { ReplyOperation } from "./reply-run-registry.js";
+import { admitReplyTurn } from "./reply-turn-admission.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
 import { createTypingSignaler } from "./typing-mode.js";
@@ -398,7 +400,8 @@ export function createFollowupRunner(params: {
       .filter((end): end is () => void => typeof end === "function");
     const queuedImages = queued.images ?? opts?.images;
     const queuedImageOrder = queued.imageOrder ?? opts?.imageOrder;
-    let replyOperation: ReturnType<typeof createReplyOperation> | undefined;
+    let replyOperation: ReplyOperation | undefined;
+    let deferred = false;
 
     try {
       queued.run.config = await resolveQueuedReplyExecutionConfig(queued.run.config, {
@@ -482,12 +485,38 @@ export function createFollowupRunner(params: {
           await Promise.all(pendingProgressDeliveries);
         }
       };
-      replyOperation = createReplyOperation({
+      const admission = await admitReplyTurn({
         sessionId: run.sessionId,
         sessionKey: replySessionKey ?? "",
+        kind: "queued_followup",
         resetTriggered: false,
         upstreamAbortSignal: queued.abortSignal,
       });
+      if (admission.status === "skipped") {
+        if (admission.reason === "active-run") {
+          deferred = true;
+          throw new FollowupRunDeferredError("Follow-up reply lane is still active");
+        }
+        return;
+      }
+      replyOperation = admission.operation;
+      if (replyOperation.sessionId !== run.sessionId) {
+        run = { ...run, sessionId: replyOperation.sessionId };
+        effectiveQueued = { ...effectiveQueued, run };
+        const admittedSessionEntry = replySessionKey
+          ? (sessionStore?.[replySessionKey] ??
+            (storePath
+              ? (readSessionEntry(storePath, replySessionKey) as SessionEntry | undefined)
+              : undefined))
+          : undefined;
+        if (admittedSessionEntry?.sessionId === replyOperation.sessionId) {
+          activeSessionEntry = admittedSessionEntry;
+          if (admittedSessionEntry.sessionFile) {
+            run = { ...run, sessionFile: admittedSessionEntry.sessionFile };
+            effectiveQueued = { ...effectiveQueued, run };
+          }
+        }
+      }
       const runId = crypto.randomUUID();
       const shouldSurfaceToControlUi = isInternalMessageChannel(
         resolveOriginMessageProvider({
@@ -595,6 +624,7 @@ export function createFollowupRunner(params: {
       fallbackProvider = run.provider;
       fallbackModel = run.model;
       replyOperation.setPhase("running");
+      const runAbortSignal = replyOperation.abortSignal;
       let pendingDeferredCliTerminal:
         | {
             provider: string;
@@ -610,6 +640,7 @@ export function createFollowupRunner(params: {
           ...resolveModelFallbackOptions(run, runtimeConfig),
           cfg: runtimeConfig,
           runId,
+          abortSignal: runAbortSignal,
           resolveAgentHarnessRuntimeOverride: (provider) =>
             resolveSessionRuntimeOverrideForProvider({
               provider,
@@ -664,6 +695,11 @@ export function createFollowupRunner(params: {
                   }) ??
                   provider);
             let attemptCompactionCount = 0;
+            const userTurnTranscriptRecorder =
+              effectiveQueued.userTurnTranscriptRecorder ?? opts?.userTurnTranscriptRecorder;
+            const notifyUserMessagePersisted = () => {
+              queuedUserMessagePersistedAcrossFallback = true;
+            };
             try {
               if (isCliProvider(cliExecutionProvider, runtimeConfig)) {
                 const isRoomEventCliRun = queued.currentInboundEventKind === "room_event";
@@ -694,6 +730,9 @@ export function createFollowupRunner(params: {
                     config: runtimeConfig,
                     prompt: queued.prompt,
                     transcriptPrompt: queued.transcriptPrompt,
+                    suppressNextUserMessagePersistence: suppressQueuedUserPersistenceForCandidate,
+                    userTurnTranscriptRecorder,
+                    onUserMessagePersisted: notifyUserMessagePersisted,
                     currentInboundEventKind: queued.currentInboundEventKind,
                     currentInboundContext: queued.currentInboundContext,
                     inputProvenance: run.inputProvenance,
@@ -727,7 +766,7 @@ export function createFollowupRunner(params: {
                     }),
                     agentAccountId: run.agentAccountId,
                     disableTools: opts?.disableTools,
-                    abortSignal: queued.abortSignal,
+                    abortSignal: runAbortSignal,
                   },
                   transformResult: (rawResult) =>
                     isRoomEventCliRun && rawResult.meta.agentMeta
@@ -784,6 +823,7 @@ export function createFollowupRunner(params: {
                 skillsSnapshot: run.skillsSnapshot,
                 prompt: queued.prompt,
                 transcriptPrompt: queued.transcriptPrompt,
+                userTurnTranscriptRecorder,
                 currentInboundEventKind: queued.currentInboundEventKind,
                 currentInboundContext: queued.currentInboundContext,
                 extraSystemPrompt: run.extraSystemPrompt,
@@ -791,9 +831,7 @@ export function createFollowupRunner(params: {
                 sourceReplyDeliveryMode: run.sourceReplyDeliveryMode,
                 forceMessageTool: run.sourceReplyDeliveryMode === "message_tool_only",
                 suppressNextUserMessagePersistence: suppressQueuedUserPersistenceForCandidate,
-                onUserMessagePersisted: () => {
-                  queuedUserMessagePersistedAcrossFallback = true;
-                },
+                onUserMessagePersisted: notifyUserMessagePersisted,
                 suppressTranscriptOnlyAssistantPersistence:
                   run.suppressTranscriptOnlyAssistantPersistence,
                 suppressAssistantErrorPersistence: suppressAssistantErrorPersistenceForCandidate,
@@ -814,7 +852,7 @@ export function createFollowupRunner(params: {
                 bashElevated: run.bashElevated,
                 timeoutMs: run.timeoutMs,
                 runId,
-                abortSignal: queued.abortSignal,
+                abortSignal: runAbortSignal,
                 images: queuedImages,
                 imageOrder: queuedImageOrder,
                 allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
@@ -1043,7 +1081,9 @@ export function createFollowupRunner(params: {
           );
         }
       }
-      completeFollowupRunLifecycle(queued);
+      if (!deferred) {
+        completeFollowupRunLifecycle(queued);
+      }
       replyOperation?.complete();
       // Both signals are required for the typing controller to clean up.
       // The main inbound dispatch path calls markDispatchIdle() from the

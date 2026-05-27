@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, UserMessage, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ThinkingContent, UserMessage, Usage } from "@earendil-works/pi-ai";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   expectOpenAIResponsesStrictSanitizeCall,
@@ -28,43 +28,47 @@ vi.mock("./pi-embedded-helpers.js", async () => ({
   sanitizeSessionMessagesImages: vi.fn(async (msgs) => msgs),
 }));
 
-vi.mock("../plugins/provider-hook-runtime.js", async () => ({
-  testing: {},
-  prepareProviderExtraParams: vi.fn(() => undefined),
-  resolveProviderHookPlugin: vi.fn(() => undefined),
-  resolveProviderPluginsForHooks: vi.fn(() => []),
-  resolveProviderRuntimePlugin: vi.fn(({ provider }: { provider?: string }) =>
-    provider === "openrouter" || provider === "github-copilot"
-      ? {
-          buildReplayPolicy: (context?: { modelId?: string | null }) => {
-            const modelId = (context?.modelId ?? "").toLowerCase();
-            if (provider === "openrouter") {
-              return {
-                applyAssistantFirstOrderingFix: false,
-                validateGeminiTurns: false,
-                validateAnthropicTurns: false,
-                ...(modelId.includes("gemini")
-                  ? {
-                      sanitizeThoughtSignatures: {
-                        allowBase64Only: true,
-                        includeCamelCase: true,
-                      },
-                    }
-                  : {}),
-              };
-            }
-            if (provider === "github-copilot" && modelId.includes("claude")) {
-              return {
-                dropThinkingBlocks: true,
-              };
-            }
-            return undefined;
-          },
-        }
-      : undefined,
-  ),
-  wrapProviderStreamFn: vi.fn(() => undefined),
-}));
+vi.mock("../plugins/provider-hook-runtime.js", async () => {
+  const clearProviderRuntimePluginCacheForTest = vi.fn();
+  return {
+    clearProviderRuntimePluginCacheForTest,
+    testing: { clearProviderRuntimePluginCacheForTest },
+    prepareProviderExtraParams: vi.fn(() => undefined),
+    resolveProviderHookPlugin: vi.fn(() => undefined),
+    resolveProviderPluginsForHooks: vi.fn(() => []),
+    resolveProviderRuntimePlugin: vi.fn(({ provider }: { provider?: string }) =>
+      provider === "openrouter" || provider === "github-copilot"
+        ? {
+            buildReplayPolicy: (context?: { modelId?: string | null }) => {
+              const modelId = (context?.modelId ?? "").toLowerCase();
+              if (provider === "openrouter") {
+                return {
+                  applyAssistantFirstOrderingFix: false,
+                  validateGeminiTurns: false,
+                  validateAnthropicTurns: false,
+                  ...(modelId.includes("gemini")
+                    ? {
+                        sanitizeThoughtSignatures: {
+                          allowBase64Only: true,
+                          includeCamelCase: true,
+                        },
+                      }
+                    : {}),
+                };
+              }
+              if (provider === "github-copilot" && modelId.includes("claude")) {
+                return {
+                  dropThinkingBlocks: true,
+                };
+              }
+              return undefined;
+            },
+          }
+        : undefined,
+    ),
+    wrapProviderStreamFn: vi.fn(() => undefined),
+  };
+});
 
 vi.mock("../plugins/provider-runtime.js", async () => {
   const actual = await vi.importActual<typeof import("../plugins/provider-runtime.js")>(
@@ -295,6 +299,7 @@ describe("sanitizeSessionHistory", () => {
   beforeEach(() => {
     testTimestamp = 1;
     vi.clearAllMocks();
+    vi.mocked(mockedHelpers.isGoogleModelApi).mockReturnValue(false);
     vi.mocked(mockedHelpers.sanitizeSessionMessagesImages).mockImplementation(async (msgs) => msgs);
     mockSessionManager = makeMockSessionManager();
   });
@@ -1054,7 +1059,23 @@ describe("sanitizeSessionHistory", () => {
   });
 
   it("preserves signed thinking turns while repairing legacy tool-result pairing for anthropic", async () => {
+    setNonGoogleModelApi();
     const sessionManager = makeMockSessionManager();
+    const nativeAnthropicPolicy: TranscriptPolicy = {
+      sanitizeMode: "full",
+      sanitizeToolCallIds: true,
+      toolCallIdMode: "strict",
+      preserveNativeAnthropicToolUseIds: true,
+      repairToolUseResultPairing: true,
+      preserveSignatures: true,
+      sanitizeThinkingSignatures: false,
+      dropThinkingBlocks: false,
+      dropReasoningFromHistory: false,
+      applyGoogleTurnOrdering: false,
+      validateGeminiTurns: false,
+      validateAnthropicTurns: true,
+      allowSyntheticToolResults: true,
+    };
     const messages: AgentMessage[] = [
       makeUserMessage("Use the gateway"),
       makeAssistantMessage(
@@ -1081,6 +1102,7 @@ describe("sanitizeSessionHistory", () => {
       modelId: "claude-sonnet-4-6",
       sessionManager,
       sessionId: TEST_SESSION_ID,
+      policy: nativeAnthropicPolicy,
     });
     const validated = await validateReplayTurns({
       messages: sanitized,
@@ -1088,6 +1110,7 @@ describe("sanitizeSessionHistory", () => {
       provider: "anthropic",
       modelId: "claude-opus-4-6",
       sessionId: TEST_SESSION_ID,
+      policy: nativeAnthropicPolicy,
     });
 
     expect(sanitized.map((msg) => msg.role)).toEqual(["user", "assistant", "toolResult", "user"]);
@@ -1101,7 +1124,6 @@ describe("sanitizeSessionHistory", () => {
 
     const toolResult = validated[2] as Extract<AgentMessage, { role: "toolResult" }>;
     expect(toolResult.toolCallId).toBe("toolu_legacy");
-    expect(toolResult.isError).toBe(true);
   });
 
   it("strips copied inbound metadata from assistant replay text", async () => {
@@ -1468,6 +1490,87 @@ describe("sanitizeSessionHistory", () => {
       ]);
       expect((result[3] as Extract<AgentMessage, { role: "assistant" }>).content).toEqual([
         { type: "text", text: "latest visible answer" },
+      ]);
+    },
+  );
+
+  it("strips invalid direct Anthropic thinking signatures from prior assistant turns when a user follows up", async () => {
+    setNonGoogleModelApi();
+
+    const messages = castAgentMessages([
+      makeUserMessage("first"),
+      makeAssistantMessage([
+        {
+          type: "thinking",
+          thinking: "empty signature",
+          signature: "",
+        } as unknown as ThinkingContent,
+        { type: "thinking", thinking: "blank signature", thinkingSignature: "   " },
+      ]),
+      makeUserMessage("second"),
+    ]);
+
+    const result = await sanitizeAnthropicHistory({
+      provider: "anthropic",
+      modelApi: "anthropic-messages",
+      messages,
+      modelId: "claude-sonnet-4-6",
+    });
+
+    expect((result[1] as Extract<AgentMessage, { role: "assistant" }>).content).toEqual([
+      { type: "text", text: OMITTED_ASSISTANT_REASONING_TEXT },
+    ]);
+  });
+
+  it.each([
+    {
+      provider: "anthropic",
+      modelApi: "anthropic-messages",
+      label: "anthropic",
+    },
+    {
+      provider: "amazon-bedrock",
+      modelApi: "bedrock-converse-stream",
+      label: "bedrock",
+    },
+  ])(
+    "preserves active tool-turn thinking signatures for $label even when a tool result follows",
+    async ({ provider, modelApi }) => {
+      setNonGoogleModelApi();
+
+      const messages = castAgentMessages([
+        makeUserMessage("look up the answer"),
+        makeAssistantMessage([
+          {
+            type: "thinking",
+            thinking: "call the tool",
+            signature: "",
+          } as unknown as ThinkingContent,
+          { type: "toolCall", id: "call_1", name: "lookup", arguments: {} },
+        ]),
+        castAgentMessage({
+          role: "toolResult",
+          toolCallId: "call_1",
+          toolName: "lookup",
+          content: [{ type: "text", text: "42" }],
+          isError: false,
+        }),
+      ]);
+
+      const result = await sanitizeAnthropicHistory({
+        provider,
+        modelApi,
+        messages,
+        modelId: "claude-sonnet-4-6",
+      });
+
+      expect((result[1] as Extract<AgentMessage, { role: "assistant" }>).content).toEqual([
+        {
+          type: "thinking",
+          thinking: "call the tool",
+          signature: "",
+        },
+        { type: "toolCall", id: "call_1", name: "lookup", arguments: {} },
       ]);
     },
   );

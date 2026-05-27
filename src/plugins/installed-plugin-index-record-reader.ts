@@ -1,16 +1,14 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { PluginInstallRecord } from "../config/types.plugins.js";
 import { tryReadJson, tryReadJsonSync } from "../infra/json-files.js";
+import { isRecord } from "../shared/record-coerce.js";
 import { resolveDefaultPluginNpmDir, validatePluginId } from "./install-paths.js";
 import {
   resolveInstalledPluginIndexStorePath,
   type InstalledPluginIndexStoreOptions,
 } from "./installed-plugin-index-store-path.js";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function cloneInstallRecords(
   records: Record<string, PluginInstallRecord> | undefined,
@@ -242,8 +240,9 @@ const installRecordsCache = new Map<string, InstallRecordsCacheEntry>();
 
 function readFileSignature(filePath: string): string {
   try {
-    const stat = fs.statSync(filePath);
-    return `${stat.mtimeMs}:${stat.size}`;
+    const stat = fs.statSync(filePath, { bigint: true });
+    const hash = crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("base64url");
+    return `${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}:${hash}`;
   } catch {
     return "missing";
   }

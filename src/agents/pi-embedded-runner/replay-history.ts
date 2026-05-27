@@ -17,10 +17,12 @@ import {
   hasInterSessionUserProvenance,
   normalizeInputProvenance,
 } from "../../sessions/input-provenance.js";
+import { asFiniteNumber } from "../../shared/number-coercion.js";
 import { resolveImageSanitizationLimits } from "../image-sanitization.js";
 import {
   downgradeOpenAIFunctionCallReasoningPairs,
   downgradeOpenAIReasoningBlocks,
+  normalizeOpenAIResponsesToolCallIds,
   sanitizeGoogleTurnOrdering,
   sanitizeSessionMessagesImages,
   validateAnthropicTurns,
@@ -49,6 +51,7 @@ import { isZeroUsageEmptyStopAssistantTurn } from "./empty-assistant-turn.js";
 import {
   dropReasoningFromHistory,
   dropThinkingBlocks,
+  shouldPreserveLatestAssistantThinking,
   stripInvalidThinkingSignatures,
 } from "./thinking.js";
 
@@ -536,7 +539,7 @@ function normalizeAssistantUsageCost(usage: unknown): AssistantUsageSnapshot["co
 }
 
 function toFiniteCostNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return asFiniteNumber(value);
 }
 
 function ensureAssistantUsageSnapshots(messages: AgentMessage[]): AgentMessage[] {
@@ -726,6 +729,9 @@ export async function sanitizeSessionHistory(params: {
       ...resolveImageSanitizationLimits(params.config),
     },
   );
+  const preserveLatestAssistantThinking =
+    params.preserveLatestAssistantThinking ??
+    shouldPreserveLatestAssistantThinking(sanitizedImages);
   // Some recovery paths supply a narrow policy with preserveSignatures disabled.
   // Native signed-thinking providers still cannot replay missing/blank
   // signatures once the assistant turn is no longer latest in the outbound
@@ -733,7 +739,7 @@ export async function sanitizeSessionHistory(params: {
   const validatedThinkingSignatures =
     signedThinkingProvider || policy.preserveSignatures
       ? stripInvalidThinkingSignatures(sanitizedImages, {
-          preserveLatestAssistant: params.preserveLatestAssistantThinking ?? true,
+          preserveLatestAssistant: preserveLatestAssistantThinking,
         })
       : sanitizedImages;
   const droppedReasoning = policy.dropReasoningFromHistory
@@ -761,9 +767,11 @@ export async function sanitizeSessionHistory(params: {
       : sanitizedToolCalls;
   const openAISafeToolCalls = isOpenAIResponsesApi
     ? downgradeOpenAIFunctionCallReasoningPairs(
-        downgradeOpenAIReasoningBlocks(openAIRepairedToolCalls, {
-          dropReplayableReasoning: modelChanged,
-        }),
+        normalizeOpenAIResponsesToolCallIds(
+          downgradeOpenAIReasoningBlocks(openAIRepairedToolCalls, {
+            dropReplayableReasoning: modelChanged,
+          }),
+        ),
       )
     : sanitizedToolCalls;
   const sanitizedToolIds =

@@ -1,6 +1,6 @@
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { bundledDistPluginFile, bundledPluginFile } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it } from "vitest";
 import { listBundledPluginPackArtifacts } from "../scripts/lib/bundled-plugin-build-entries.mjs";
@@ -28,6 +28,7 @@ import {
   PACKED_CLI_SMOKE_COMMANDS,
   PACKED_COMPLETION_SMOKE_ARGS,
   packageNameFromSpecifier,
+  resolveReleaseNpmCommand,
   resolveMissingPackBuildHint,
 } from "../scripts/release-check.ts";
 import { COMPLETION_SKIP_PLUGIN_COMMANDS_ENV } from "../src/cli/completion-runtime.ts";
@@ -155,6 +156,38 @@ describe("packed CLI smoke", () => {
       OPENCLAW_DISABLE_BUNDLED_ENTRY_SOURCE_FALLBACK: "1",
       [COMPLETION_SKIP_PLUGIN_COMMANDS_ENV]: "1",
     });
+  });
+});
+
+describe("resolveReleaseNpmCommand", () => {
+  it("wraps Windows npm.cmd release checks through cmd.exe without shell mode", () => {
+    const nodeDir = "C:\\Program Files\\nodejs";
+    const npmCmdPath = win32.resolve(nodeDir, "npm.cmd");
+
+    expect(
+      resolveReleaseNpmCommand(["pack", "--dry-run", "--json"], {
+        comSpec: "C:\\Windows\\System32\\cmd.exe",
+        env: { PATH: "C:\\bin" },
+        execPath: win32.join(nodeDir, "node.exe"),
+        existsSync: (candidate) => candidate === npmCmdPath,
+        platform: "win32",
+      }),
+    ).toEqual({
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/s", "/c", '""C:\\Program Files\\nodejs\\npm.cmd" pack --dry-run --json"'],
+      shell: false,
+      windowsVerbatimArguments: true,
+    });
+  });
+
+  it("rejects bare npm fallback on Windows release checks", () => {
+    expect(() =>
+      resolveReleaseNpmCommand(["pack"], {
+        execPath: "C:\\Program Files\\nodejs\\node.exe",
+        existsSync: () => false,
+        platform: "win32",
+      }),
+    ).toThrow("OpenClaw refuses to shell out to bare npm on Windows");
   });
 });
 
@@ -600,6 +633,34 @@ describe("collectMissingPackPaths", () => {
     }
   });
 
+  it("rejects packed plugin SDK root aliases that depend on minified export letters", () => {
+    const root = mkdtempSync(join(tmpdir(), "release-check-packed-root-alias-"));
+    try {
+      const packageRoot = join(root, "openclaw");
+      const pluginSdkDir = join(packageRoot, "dist", "plugin-sdk");
+      mkdirSync(pluginSdkDir, { recursive: true });
+      writeFileSync(
+        join(packageRoot, "package.json"),
+        `${JSON.stringify({ name: "openclaw", version: "2026.5.14-beta.3", dependencies: {} })}\n`,
+      );
+      writeFileSync(
+        join(pluginSdkDir, "root-alias.cjs"),
+        "module.exports = { onDiagnosticEvent: mod.r };\n",
+      );
+
+      expect(
+        collectPackedInstalledPackageVerificationErrors({
+          expectedVersion: "2026.5.14-beta.3",
+          packageRoot,
+        }),
+      ).toContain(
+        "installed package dist/plugin-sdk/root-alias.cjs depends on a single-letter bundled export alias.",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("requires bundled plugin runtime sidecars that dynamic plugin boundaries resolve at runtime", () => {
     expect(requiredBundledPluginPackPaths).not.toContain(
       bundledDistPluginFile("slack", "runtime-api.js"),
@@ -664,22 +725,22 @@ describe("collectPackUnpackedSizeErrors", () => {
 });
 
 describe("collectCriticalPluginSdkEntrypointSizeErrors", () => {
-  it("flags oversized plugin SDK test-contract entrypoints before publish", () => {
+  it("flags oversized public plugin SDK entrypoints before publish", () => {
     const root = mkdtempSync(join(tmpdir(), "release-check-critical-sdk-"));
     try {
       const pluginSdkDir = join(root, "dist", "plugin-sdk");
       mkdirSync(pluginSdkDir, { recursive: true });
-      writeFileSync(join(pluginSdkDir, "agent-runtime-test-contracts.js"), "export {};\n");
-      writeFileSync(join(pluginSdkDir, "provider-test-contracts.js"), "export {};\n");
+      writeFileSync(join(pluginSdkDir, "core.js"), "export {};\n");
+      writeFileSync(join(pluginSdkDir, "runtime.js"), "export {};\n");
       writeFileSync(
-        join(pluginSdkDir, "plugin-test-contracts.js"),
+        join(pluginSdkDir, "provider-entry.js"),
         "x".repeat(MAX_CRITICAL_PLUGIN_SDK_ENTRYPOINT_BYTES + 1),
       );
 
       expect(collectCriticalPluginSdkEntrypointSizeErrors(root)).toEqual([
-        `dist/plugin-sdk/plugin-test-contracts.js is ${
+        `dist/plugin-sdk/provider-entry.js is ${
           MAX_CRITICAL_PLUGIN_SDK_ENTRYPOINT_BYTES + 1
-        } bytes, exceeding ${MAX_CRITICAL_PLUGIN_SDK_ENTRYPOINT_BYTES} bytes. Keep public SDK test-contract entrypoints lazy and avoid bundling compiler/runtime internals.`,
+        } bytes, exceeding ${MAX_CRITICAL_PLUGIN_SDK_ENTRYPOINT_BYTES} bytes. Keep public SDK package entrypoints lazy and avoid bundling compiler/runtime internals.`,
       ]);
     } finally {
       rmSync(root, { recursive: true, force: true });

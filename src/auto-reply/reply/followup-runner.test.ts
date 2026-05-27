@@ -5,6 +5,10 @@ import { DELIVERY_NO_REPLY_RUNTIME_CONTRACT } from "openclaw/plugin-sdk/agent-ru
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
+import {
+  createUserTurnTranscriptRecorder,
+  type PersistedUserTurnMessage,
+} from "../../sessions/user-turn-transcript.js";
 import type { FollowupRun, QueueSettings } from "./queue.js";
 
 const runEmbeddedPiAgentMock = vi.fn();
@@ -31,6 +35,8 @@ let sessionRunAccounting: typeof import("./session-run-accounting.js");
 let setRuntimeConfigSnapshot: typeof import("../../config/config.js").setRuntimeConfigSnapshot;
 let createMockFollowupRun: typeof import("./test-helpers.js").createMockFollowupRun;
 let createMockTypingController: typeof import("./test-helpers.js").createMockTypingController;
+let createReplyOperationForTest: typeof import("./reply-run-registry.js").createReplyOperation;
+let replyRunTestingForTest: typeof import("./reply-run-registry.js").testing;
 const FOLLOWUP_DEBUG = process.env.OPENCLAW_DEBUG_FOLLOWUP_RUNNER_TEST === "1";
 const FOLLOWUP_TEST_QUEUES = new Map<
   string,
@@ -56,6 +62,14 @@ function joinPromptSections(...sections: Array<string | undefined>): string {
     }
   }
   return promptSections.join("\n\n");
+}
+
+function createTestUserTurnRecorder(message: PersistedUserTurnMessage) {
+  return createUserTurnTranscriptRecorder({
+    message,
+    target: { transcriptPath: "/tmp/session.jsonl" },
+    updateMode: "none",
+  });
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
@@ -436,6 +450,8 @@ async function loadFreshFollowupRunnerModuleForTest() {
   ({ clearFollowupQueue, enqueueFollowupRun } = await import("./queue.js"));
   sessionRunAccounting = await import("./session-run-accounting.js");
   ({ createMockFollowupRun, createMockTypingController } = await import("./test-helpers.js"));
+  ({ createReplyOperation: createReplyOperationForTest, testing: replyRunTestingForTest } =
+    await import("./reply-run-registry.js"));
 }
 
 const ROUTABLE_TEST_CHANNELS = new Set([
@@ -453,6 +469,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  replyRunTestingForTest?.resetReplyRunRegistry();
   clearRuntimeConfigSnapshot?.();
   runEmbeddedPiAgentMock.mockReset();
   runCliAgentMock.mockReset();
@@ -507,6 +524,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  replyRunTestingForTest?.resetReplyRunRegistry();
   clearRuntimeConfigSnapshot?.();
   clearFollowupQueue("main");
   FOLLOWUP_TEST_QUEUES.clear();
@@ -539,6 +557,94 @@ function createQueuedRun(
 ): FollowupRun {
   return createMockFollowupRun(overrides);
 }
+
+describe("createFollowupRunner reply-lane admission", () => {
+  it("passes prepared media user turns to embedded runtime dispatch", async () => {
+    const preparedUserTurnMessage = {
+      role: "user",
+      content: "describe this",
+      MediaPath: "/tmp/image.png",
+      MediaType: "image/png",
+    } as never;
+    runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "done" }],
+      meta: {},
+    });
+    const runner = createFollowupRunner({
+      typing: createMockTypingController(),
+      typingMode: "instant",
+      sessionKey: "main",
+      defaultModel: "anthropic/claude",
+    });
+
+    await runner(
+      createQueuedRun({
+        userTurnTranscriptRecorder: createTestUserTurnRecorder(preparedUserTurnMessage),
+        run: {
+          provider: "anthropic",
+          model: "claude",
+        },
+      }),
+    );
+
+    expect(runEmbeddedPiAgentMock).toHaveBeenCalledOnce();
+    const call = requireLastMockCallArg(runEmbeddedPiAgentMock, "run embedded pi agent");
+    const recorder = requireRecord(call.userTurnTranscriptRecorder, "embedded user turn recorder");
+    expect(recorder.message).toBe(preparedUserTurnMessage);
+  });
+
+  it("runs queued followups with the session id returned by admission", async () => {
+    const active = createReplyOperationForTest({
+      sessionKey: "main",
+      sessionId: "pre-compact-session",
+      resetTriggered: false,
+    });
+    active.setPhase("preflight_compacting");
+    runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [],
+      meta: { agentMeta: { provider: "anthropic", model: "claude" } },
+    });
+    const sessionStore = {
+      main: {
+        sessionId: "pre-compact-session",
+        sessionFile: "/tmp/pre-compact.jsonl",
+        updatedAt: Date.now(),
+      },
+    };
+    const runner = createFollowupRunner({
+      typing: createMockTypingController(),
+      typingMode: "instant",
+      sessionEntry: sessionStore.main,
+      sessionStore,
+      sessionKey: "main",
+      defaultModel: "anthropic/claude",
+    });
+
+    const pending = runner(
+      createQueuedRun({
+        run: {
+          sessionId: "queued-stale-session",
+          sessionKey: "main",
+          provider: "anthropic",
+          model: "claude",
+        },
+      }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    active.updateSessionId("post-compact-session");
+    sessionStore.main = {
+      sessionId: "post-compact-session",
+      sessionFile: "/tmp/post-compact.jsonl",
+      updatedAt: Date.now(),
+    };
+    active.complete();
+    await pending;
+
+    const call = requireLastMockCallArg(runEmbeddedPiAgentMock, "run embedded pi agent");
+    expect(call.sessionId).toBe("post-compact-session");
+    expect(call.sessionFile).toBe("/tmp/post-compact.jsonl");
+  });
+});
 
 async function normalizeComparablePath(filePath: string): Promise<string> {
   const parent = await fs.realpath(path.dirname(filePath)).catch(() => path.dirname(filePath));
@@ -740,6 +846,7 @@ describe("createFollowupRunner runtime config", () => {
         originatingChannel: "telegram",
         run: {
           config: runtimeConfig,
+          sessionId: "session-cli-followup",
           provider: "anthropic",
           model: "claude-opus-4-7",
           messageProvider: "telegram",
@@ -755,6 +862,63 @@ describe("createFollowupRunner runtime config", () => {
     expect(call.config).toBe(runtimeConfig);
     expect(call.cliSessionId).toBe("cli-session-1");
     expect(call.messageChannel).toBe("telegram");
+    expect(call).toMatchObject({
+      sessionId: "session-cli-followup",
+      sessionKey: "main",
+      agentId: "agent",
+      workspaceDir: "/tmp",
+      config: runtimeConfig,
+      suppressNextUserMessagePersistence: false,
+    });
+    expect(call.onUserMessagePersisted).toEqual(expect.any(Function));
+  });
+
+  it("passes prepared media user turns to CLI runtime dispatch", async () => {
+    const runtimeConfig: OpenClawConfig = {
+      agents: {
+        defaults: {
+          cliBackends: {
+            "claude-cli": { command: "claude" },
+          },
+          models: {
+            "anthropic/claude-opus-4-7": { agentRuntime: { id: "claude-cli" } },
+          },
+        },
+      },
+    };
+    const preparedUserTurnMessage = {
+      role: "user",
+      content: "describe this",
+      MediaPath: "/tmp/image.png",
+      MediaType: "image/png",
+    } as never;
+    runCliAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "done" }],
+      meta: {},
+    });
+
+    const runner = createFollowupRunner({
+      typing: createMockTypingController(),
+      typingMode: "instant",
+      sessionKey: "main",
+      defaultModel: "anthropic/claude-opus-4-7",
+    });
+
+    await runner(
+      createQueuedRun({
+        userTurnTranscriptRecorder: createTestUserTurnRecorder(preparedUserTurnMessage),
+        run: {
+          config: runtimeConfig,
+          provider: "anthropic",
+          model: "claude-opus-4-7",
+        },
+      }),
+    );
+
+    expect(runCliAgentMock).toHaveBeenCalledOnce();
+    const mediaCall = requireLastMockCallArg(runCliAgentMock, "run cli agent");
+    const recorder = requireRecord(mediaCall.userTurnTranscriptRecorder, "cli user turn recorder");
+    expect(recorder.message).toBe(preparedUserTurnMessage);
   });
 
   it("defers queued CLI attempt terminal lifecycle events until fallback settles", async () => {
@@ -925,7 +1089,7 @@ describe("createFollowupRunner runtime config", () => {
     expect(typing.markDispatchIdle).toHaveBeenCalledTimes(1);
   });
 
-  it("passes queued room-event abort signals into followup agent runs", async () => {
+  it("passes the admitted reply abort signal into followup fallback and agent runs", async () => {
     const abortController = new AbortController();
     runEmbeddedPiAgentMock.mockResolvedValueOnce({
       payloads: [],
@@ -949,8 +1113,14 @@ describe("createFollowupRunner runtime config", () => {
       }),
     );
 
+    const fallbackCall = requireLastMockCallArg(
+      runWithModelFallbackMock,
+      "run with model fallback",
+    );
     const call = requireLastMockCallArg(runEmbeddedPiAgentMock, "run embedded pi agent");
-    expect(call.abortSignal).toBe(abortController.signal);
+    expect(fallbackCall.abortSignal).toBeInstanceOf(AbortSignal);
+    expect(fallbackCall.abortSignal).not.toBe(abortController.signal);
+    expect(call.abortSignal).toBe(fallbackCall.abortSignal);
   });
 
   it("does not inherit source abort signals for queued user followups", async () => {
@@ -978,8 +1148,14 @@ describe("createFollowupRunner runtime config", () => {
       }),
     );
 
+    const fallbackCall = requireLastMockCallArg(
+      runWithModelFallbackMock,
+      "run with model fallback",
+    );
     const call = requireLastMockCallArg(runEmbeddedPiAgentMock, "run embedded pi agent");
-    expect(call.abortSignal).toBeUndefined();
+    expect(fallbackCall.abortSignal).toBeInstanceOf(AbortSignal);
+    expect(fallbackCall.abortSignal).not.toBe(sourceAbortController.signal);
+    expect(call.abortSignal).toBe(fallbackCall.abortSignal);
   });
 
   it("keeps queued delivery correlations active during followup agent runs", async () => {
