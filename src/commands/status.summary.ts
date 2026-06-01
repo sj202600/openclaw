@@ -4,7 +4,7 @@ import { getRuntimeConfig } from "../config/config.js";
 import { resolveMainSessionKey } from "../config/sessions/main-session.js";
 import { hasSessionAutoModelFallbackProvenance } from "../config/sessions/model-override-provenance.js";
 import { resolveStorePath } from "../config/sessions/paths.js";
-import { readSessionStoreReadOnly } from "../config/sessions/store-read.js";
+import { listSessionEntries } from "../config/sessions/session-accessor.js";
 import { resolveSessionTotalTokens, type SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { resolveCronJobsStorePath } from "../cron/store.js";
@@ -120,7 +120,7 @@ function hasUserPinnedModelSelection(entry: SessionEntry | undefined): boolean {
 
 type SessionCandidate = {
   key: string;
-  entry: SessionEntry | undefined;
+  entry: SessionEntry;
   updatedAt: number | null;
 };
 
@@ -128,11 +128,11 @@ function compareSessionCandidatesByUpdatedAt(left: SessionCandidate, right: Sess
   return (right.updatedAt ?? 0) - (left.updatedAt ?? 0);
 }
 
-function listSessionCandidates(store: Record<string, SessionEntry | undefined>) {
-  return Object.entries(store)
-    .filter(([key]) => key !== "global" && key !== "unknown")
-    .map(([key, entry]) => ({
-      key,
+function listSessionCandidates(storePath: string) {
+  return listSessionEntries({ storePath })
+    .filter(({ sessionKey }) => sessionKey !== "global" && sessionKey !== "unknown")
+    .map(({ sessionKey, entry }) => ({
+      key: sessionKey,
       entry,
       updatedAt: entry?.updatedAt ?? null,
     }))
@@ -240,23 +240,13 @@ export async function getStatusSummary(
       allowAsyncLoad: false,
     }) ?? DEFAULT_CONTEXT_TOKENS;
 
-  const storeCache = new Map<string, Record<string, SessionEntry | undefined>>();
   const candidateCache = new Map<string, SessionCandidate[]>();
-  const loadStore = (storePath: string) => {
-    const cached = storeCache.get(storePath);
-    if (cached) {
-      return cached;
-    }
-    const store = readSessionStoreReadOnly(storePath);
-    storeCache.set(storePath, store);
-    return store;
-  };
   const loadSessionCandidates = (storePath: string) => {
     const cached = candidateCache.get(storePath);
     if (cached) {
       return cached;
     }
-    const candidates = listSessionCandidates(loadStore(storePath));
+    const candidates = listSessionCandidates(storePath);
     candidateCache.set(storePath, candidates);
     return candidates;
   };
