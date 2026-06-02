@@ -1758,6 +1758,12 @@ export async function syncWorkboardLifecycle(params: {
         id: card.id,
         patch,
       });
+      const currentCard = state.cards.find((candidate) => candidate.id === card.id);
+      // The user can change status after this request was sent; lifecycle responses
+      // are full-card replacements, so stale responses need the same guard again.
+      if (!currentCard || shouldSkipLifecycleWrite(params.host, currentCard, lifecycle)) {
+        continue;
+      }
       replaceCard(state, normalizeCardPayload(payload));
       syncKeys.set(card.id, key);
     } catch (error) {
