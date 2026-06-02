@@ -1766,13 +1766,13 @@ describe("installPluginFromArchive", () => {
     expect(warnings).toStrictEqual([]);
   });
 
-  it("allows package manifests that mention formerly built-in-denied dependencies", async () => {
+  it("blocks package manifests that mention denied dependencies", async () => {
     const { pluginDir, extensionsDir } = setupPluginInstallDirs();
 
     fs.writeFileSync(
       path.join(pluginDir, "package.json"),
       JSON.stringify({
-        name: "formerly-denied-dependency-plugin",
+        name: "blocked-dependency-plugin",
         version: "1.0.0",
         openclaw: { extensions: ["index.js"] },
         dependencies: {
@@ -1784,8 +1784,15 @@ describe("installPluginFromArchive", () => {
 
     const { result, warnings } = await installFromDirWithWarnings({ pluginDir, extensionsDir });
 
-    expect(result.ok).toBe(true);
-    expect(warnings).toStrictEqual([]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(PLUGIN_INSTALL_ERROR_CODE.SECURITY_SCAN_BLOCKED);
+      expect(result.error).toContain('blocked dependencies "plain-crypto-js" in dependencies');
+      expect(result.error).toContain("declared in blocked-dependency-plugin (package.json)");
+    }
+    expect(warnings).toContain(
+      'WARNING: Plugin "blocked-dependency-plugin" installation blocked: blocked dependencies "plain-crypto-js" in dependencies declared in blocked-dependency-plugin (package.json).',
+    );
   });
 
   it("treats dangerouslyForceUnsafeInstall as a no-op for package installs", async () => {
@@ -1936,10 +1943,10 @@ describe("installPluginFromArchive", () => {
     }
   });
 
-  it("allows bundle installs with formerly built-in-denied vendored dependency names", async () => {
+  it("blocks bundle installs with denied vendored dependency names", async () => {
     const { pluginDir, extensionsDir } = setupBundleInstallFixture({
       bundleFormat: "codex",
-      name: "Formerly Denied Dependency Bundle",
+      name: "Denied Dependency Bundle",
     });
     fs.mkdirSync(path.join(pluginDir, "vendor", "plain-crypto-js"), { recursive: true });
     fs.writeFileSync(
@@ -1950,8 +1957,16 @@ describe("installPluginFromArchive", () => {
 
     const { result, warnings } = await installFromDirWithWarnings({ pluginDir, extensionsDir });
 
-    expect(result.ok).toBe(true);
-    expect(warnings).toStrictEqual([]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(PLUGIN_INSTALL_ERROR_CODE.SECURITY_SCAN_BLOCKED);
+      expect(result.error).toContain('Bundle "denied-dependency-bundle" installation blocked');
+      expect(result.error).toContain('"plain-crypto-js" as package name');
+      expect(result.error).toContain("vendor/plain-crypto-js/package.json");
+    }
+    expect(warnings.some((warning) => warning.includes('"plain-crypto-js" as package name'))).toBe(
+      true,
+    );
   });
 
   it("surfaces plugin scanner findings from before_install", async () => {
@@ -2612,7 +2627,7 @@ describe("installPluginFromDir", () => {
     expect(vi.mocked(runCommandWithTimeout)).not.toHaveBeenCalled();
   });
 
-  it("allows local installs when vendored dependencies include formerly built-in-denied packages", async () => {
+  it("blocks local installs when vendored dependencies include denied packages", async () => {
     const { pluginDir, extensionsDir } = setupInstallPluginFromDirFixture();
 
     const blockedPkgDir = path.join(pluginDir, "node_modules", "plain-crypto-js");
@@ -2631,7 +2646,12 @@ describe("installPluginFromDir", () => {
       extensionsDir,
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(PLUGIN_INSTALL_ERROR_CODE.SECURITY_SCAN_BLOCKED);
+      expect(result.error).toContain('blocked dependencies "plain-crypto-js" as package name');
+      expect(result.error).toContain("node_modules/plain-crypto-js/package.json");
+    }
     expect(vi.mocked(runCommandWithTimeout)).not.toHaveBeenCalled();
   });
 

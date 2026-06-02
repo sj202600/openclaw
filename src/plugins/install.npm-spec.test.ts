@@ -1025,7 +1025,7 @@ describe("installPluginFromNpmSpec", () => {
     const npmRoot = path.join(stateDir, "npm");
     const packageName = "unsafe-rebuild-plugin";
     const npmProjectRoot = resolvePluginNpmProjectDir({ npmDir: npmRoot, packageName });
-    fs.mkdirSync(path.join(npmProjectRoot, "node_modules", "plain-crypto-js"), {
+    fs.mkdirSync(path.join(npmProjectRoot, "node_modules", "stale-hoisted-helper"), {
       recursive: true,
     });
 
@@ -1036,7 +1036,7 @@ describe("installPluginFromNpmSpec", () => {
       pluginId: packageName,
       npmRoot,
       expectedDependencySpec: "1.0.0",
-      hoistedDependency: { name: "plain-crypto-js", version: "1.0.0" },
+      hoistedDependency: { name: "stale-hoisted-helper", version: "1.0.0" },
     });
     const delegate = runCommandWithTimeoutMock.getMockImplementation();
     if (!delegate) {
@@ -1138,7 +1138,7 @@ describe("installPluginFromNpmSpec", () => {
     expect(fs.existsSync(resolveTestPluginPackageDir(npmRoot, packageName))).toBe(false);
   });
 
-  it("allows npm installs with formerly built-in-denied hoisted transitive dependencies", async () => {
+  it("blocks npm installs with denied hoisted transitive dependencies", async () => {
     const stateDir = suiteTempRootTracker.makeTempDir();
     const npmRoot = path.join(stateDir, "npm");
 
@@ -1157,7 +1157,12 @@ describe("installPluginFromNpmSpec", () => {
       logger: { info: () => {}, warn: () => {} },
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(PLUGIN_INSTALL_ERROR_CODE.SECURITY_SCAN_BLOCKED);
+      expect(result.error).toContain('blocked dependencies "plain-crypto-js" as package name');
+      expect(result.error).toContain("node_modules/plain-crypto-js/package.json");
+    }
   });
 
   it.runIf(process.platform !== "win32")(
