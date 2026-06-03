@@ -2,12 +2,10 @@ name: Android build (ThirdParty)
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 7 * * *"
 
 concurrency:
-  group: android-build-${ github.workflow }-${ github.event_name == 'workflow_dispatch' && github.run_id || github.sha }
-  cancel-in-progress: false
+  group: android-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -23,12 +21,12 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500d0009e67214ff5f5447ce83dd# v6
+        uses: actions/checkout@v4
         with:
           submodules: false
 
       - name: Setup Java
-        uses: actions/setup-java@be666c2fcl27ec809703dec50e508c2fdc7f6654# v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
