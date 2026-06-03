@@ -19,7 +19,7 @@ permissions:
 jobs:
   build:
     name: Build Android APK (ThirdParty)
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Checkout
