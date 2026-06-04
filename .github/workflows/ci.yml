@@ -223,7 +223,7 @@ jobs:
           const runMacos =
             parseBoolean(process.env.OPENCLAW_CI_RUN_MACOS) && !docsOnly && isCanonicalRepository;
           const runAndroid =
-            parseBoolean(process.env.OPENCLAW_CI_RUN_ANDROID) && !docsOnly && isCanonicalRepository;
+            parseBoolean(process.env.OPENCLAW_CI_RUN_ANDROID) && !docsOnly;
           const runWindows =
             parseBoolean(process.env.OPENCLAW_CI_RUN_WINDOWS) &&
             !docsOnly &&
